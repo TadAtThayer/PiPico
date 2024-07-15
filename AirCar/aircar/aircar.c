@@ -82,7 +82,7 @@ volatile int32_t nextRotationCount = 0x7fffffff;
 
 // This system will start recording data after the encoder has
 // inidicated the wheels have rotate this many degrees.
-#define DEGREES_TO_START 45
+#define DEGREES_TO_START 5
 
 // This seems to be what the old aircar did.
 #define NUM_SAMPLES 720
