@@ -257,8 +257,12 @@ int main() {
         }
 
         if( !is_running && !user_button_pressed && ((timecount - prev_loop_time) >= BUTTON_DEBOUNCE_US) ){
-            if( !gpio_get(20) && (++user_button_count > 20) ){
-                user_button_pressed = true;
+            if( !gpio_get(20) ){
+                if(++user_button_count > 20){
+                    user_button_pressed = true;
+                }
+            } else if(user_button_count > 0){
+                --user_button_count;
             }
             prev_loop_time = timecount;
         }
