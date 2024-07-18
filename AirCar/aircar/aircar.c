@@ -78,6 +78,8 @@
 #define MAX_ENC_COUNTS 25920 
 
 
+#define BUTTON_DEBOUNCE_US 5000
+
 typedef struct _encoder {
     uint leadPinNum;
     uint lagPinNum;
@@ -254,10 +256,11 @@ int main() {
         
         }
 
-        if( !is_running && !user_button_pressed && ((timecount - prev_loop_time) >= SAMPLE_TIME_US) ){
+        if( !is_running && !user_button_pressed && ((timecount - prev_loop_time) >= BUTTON_DEBOUNCE_US) ){
             if( !gpio_get(20) && (++user_button_count > 20) ){
                 user_button_pressed = true;
             }
+            prev_loop_time = timecount;
         }
 
         // Start data collection after wheel rotates by some number of degrees
