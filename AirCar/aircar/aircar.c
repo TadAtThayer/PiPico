@@ -2,6 +2,7 @@
  * AirCar MarkII
  *
  * Tad Truex, F23
+ * Mike Kokko edited for 24X to output time in us and raw quadrature counts
  *
  * Goals:
  * 	At a minimum, replicate the existing 8051 firmware.  Ideally,
@@ -41,8 +42,6 @@
  *
  */
 
-
-
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
 #include "hardware/clocks.h"
@@ -61,9 +60,27 @@
 #include "version.h"
 
 
+// sampling time for reading encoder
+// if we sample too slow (large sample time) we won't get a smooth   
+// if we sample too fast (small sample time) velocity signal will be very quantized
+#define SAMPLE_TIME_US 20000
+
+
+// This system will start recording data after the encoder has
+// inidicated the wheels have rotate this many degrees.
+// BUT NOTE: can also start data collection with USER button to catch full transient 
+#define DEGREES_TO_START 1
+
+
+// define encoder count at which to stop data collection
+// this generally corresponds to near the end of the AirCar track
+// 25920 = 18 rev * 1440 counts/rev (approx dist to end of track)
+#define MAX_ENC_COUNTS 25920 
+
+
 typedef struct _encoder {
-	uint leadPinNum;
-	uint lagPinNum;
+    uint leadPinNum;
+    uint lagPinNum;
 } encoderT;
 
 const encoderT encoder = { 17, 16 };
@@ -78,14 +95,7 @@ const encoderT encoder = { 17, 16 };
 
 // Track the wheel rotations in a 30.2 format (quarter rotations)
 volatile int32_t pulseCount30p2 = 0;
-volatile int32_t nextRotationCount = 0x7fffffff;
 
-// This system will start recording data after the encoder has
-// inidicated the wheels have rotate this many degrees.
-#define DEGREES_TO_START 5
-
-// This seems to be what the old aircar did.
-#define NUM_SAMPLES 720
 
 // This is a bit of a magic number situation...
 //
@@ -93,9 +103,9 @@ volatile int32_t nextRotationCount = 0x7fffffff;
 //  "accident".  The erasing size is 4KB, so this is
 // 1024 samples of uint32_t.  All a bit convoluted, but hopefully
 // easy to tweak later if we want.
-
+// M. Kokko changed to 4x1024 = 4096 samples of uint32_t
 typedef uint32_t sample_t;
-#define maxSamples (FLASH_SECTOR_SIZE / sizeof(sample_t))
+#define maxSamples 4*(FLASH_SECTOR_SIZE / sizeof(sample_t))
 
 volatile sample_t SampleBuffer[ maxSamples ];
 #define DATA_OFFSET ((2 * 1<<20) - sizeof(SampleBuffer))
@@ -106,8 +116,7 @@ volatile sample_t SampleBuffer[ maxSamples ];
 //                                |
 // This is where flash starts ----+
 
-
-volatile bool doWrite = false;
+volatile uint16_t SampleCount = 2;  // use index 0 for length, skip index 1 to align with 2 value chunks (alternate time and encoder counts)
 
 // Track the number of 28.2us pulses.
 volatile int32_t counterTicks = 0;
@@ -125,19 +134,14 @@ int do_test(void);
 uint8_t pdisk[1<<15];
 
 
-uint32_t millis;
-
-void ledTask(uint32_t cycleTime);
-
 void pwmInterrupt(void);
 
-uint32_t msPerLedCycle = 5000;
 
 BYTE buf[FF_MAX_SS];
 
 void error( const char *buf ){
-  printf( "%s\n", buf );
-  while(1);
+    printf( "%s\n", buf );
+    while(1);
 }
 
 void initFS(void);
@@ -146,36 +150,45 @@ FATFS fs;
 
 int main() {
 
-  pulseCount30p2 = 0;
-  nextRotationCount = 0x7fffffff;
-  doWrite = false;
-  counterTicks = 0;
-  errorCount = 0;
-  
-  
-  board_init();
+    uint32_t timecount = 0;    
+    bool is_running = false;
+    uint32_t start_time = time_us_32();
+    uint32_t prev_loop_time = start_time;
+    bool led_state = false;
+    bool user_button_pressed = false;
+    uint16_t user_button_count = 0;
 
-	gpio_init(led);
-	gpio_set_dir(led, GPIO_OUT);
-	gpio_put(led,1);
+    pulseCount30p2 = 0;
+    counterTicks = 0;
+    errorCount = 0;
 
-	// Prepare for some cave man debugging
-	stdio_uart_init();
+    board_init();
 
-  // init device stack on configured roothub port
-	tud_init(BOARD_TUD_RHPORT);
+    gpio_init(led);
+    gpio_set_dir(led, GPIO_OUT);
+    gpio_put(led,1);
 
-  initRamDisk();
-  initFS();
+    // Prepare for some cave man debugging
+    stdio_uart_init();
 
-  memcpy( (void *)SampleBuffer, DATA_START, sizeof( SampleBuffer ) );
-  writeDataFile();
-  
-	gpio_init_mask(1<< encoder.lagPinNum | 1 << encoder.leadPinNum);
+    // init device stack on configured roothub port
+    tud_init(BOARD_TUD_RHPORT);
 
-	// Remove this in production
-	gpio_set_pulls(16, true, true);
-	gpio_set_pulls(17, true, true);
+    initRamDisk();
+    initFS();
+
+    // recall sample buffer and write data file
+    // first thing when program starts
+    memcpy( (void *)SampleBuffer, DATA_START, sizeof( SampleBuffer ) );
+    if(SampleBuffer[0] > maxSamples)  
+        SampleBuffer[0] = 0;
+    writeDataFile();
+
+    gpio_init_mask(1<< encoder.lagPinNum | 1 << encoder.leadPinNum);
+
+    // Remove this in production
+    gpio_set_pulls(16, true, true);
+    gpio_set_pulls(17, true, true);
 
     gpio_set_irq_enabled_with_callback(encoder.lagPinNum, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true, &stateUpdate);
     gpio_set_irq_enabled_with_callback(encoder.leadPinNum, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true, &stateUpdate);
@@ -189,7 +202,7 @@ int main() {
     gpio_set_function(4, GPIO_FUNC_SIO);
     gpio_set_dir(4, GPIO_OUT);
     gpio_put(4, 0);
-    
+
     uint slice_num = pwm_gpio_to_slice_num(4);
 
     // 125MHz cycle time for PWM clock.  3525 ticks gets us ~28.2us
@@ -203,71 +216,133 @@ int main() {
 
     irq_set_exclusive_handler( PWM_IRQ_WRAP, pwmInterrupt );
     irq_set_priority( PWM_IRQ_WRAP, 0 );
-    
+
 
     for( int i = 0; i < 26; i++ ) {
-      if ( irq_is_enabled(i) ) {
-	printf( "IRQ %d: %d\n", i, irq_get_priority(i) );
-      }
+        if ( irq_is_enabled(i) ) {
+            printf( "IRQ %d: %d\n", i, irq_get_priority(i) );
+        }
     }
 
-    msPerLedCycle = ~0;
+
+    // set up user button for starting data collection
+    gpio_init(20);
+    gpio_set_function(20, GPIO_FUNC_NULL);
+    gpio_set_dir(20, GPIO_IN);
+    gpio_set_pulls(20,true,false);
+
     printf("Main loop start\n");
-    
+    printf("maxSamples: %d\r\n",maxSamples);
+
     while(1){
-      millis = to_ms_since_boot( get_absolute_time() );
+    
+        // get current time in microseconds
+        timecount = time_us_32();
 
-      // Start data collection after 1/4 rotation
-      if ( pulseCount30p2 > DEGREES_TO_START<<2 && nextRotationCount == 0x7fffffff ) {
-	msPerLedCycle = 0;
-	nextRotationCount = pulseCount30p2 + 36;  // Nine degrees counting 1/4 degrees
-	// Set the PWM running
-	counterTicks = 0;
-	pwm_set_enabled(slice_num, true);
-	pwm_clear_irq(slice_num);
-	irq_set_enabled(PWM_IRQ_WRAP, true);
+        // enforce timing for logging encoder count
+        if( is_running && ((timecount - prev_loop_time) >= SAMPLE_TIME_US) && (SampleCount < (maxSamples-1))){
+          /*  time_vec[array_idx] = timecount;
+            count_vec[array_idx] = pulseCount30p2;
+            ++array_idx;
+            */
+            //printf("%d,%d\r\n",timecount,pulseCount30p2);
+           
+            // add time and pulse count to sample buffer 
+            SampleBuffer[SampleCount++] = timecount;
+            SampleBuffer[SampleCount++] = pulseCount30p2;
+            prev_loop_time = timecount;
+        
+        }
 
-	printf( "Sampling enabled\n" );
-      }
+        if( !is_running && !user_button_pressed && ((timecount - prev_loop_time) >= SAMPLE_TIME_US) ){
+            if( !gpio_get(20) && (++user_button_count > 20) ){
+                user_button_pressed = true;
+            }
+        }
 
-      if ( doWrite ) {	
-	uint32_t currentInterrupts;
-	
-	// Samples are currently stored as raw counts.  Need to convert to delta to match original
-	//  firmware.
-	for ( int i = NUM_SAMPLES-1; i > 0 ; i-- ) SampleBuffer[i] -= SampleBuffer[i-1];
-	writeDataFile();
+        // Start data collection after wheel rotates by some number of degrees
+        // Physical/hardware encoder is natively 360 counts/rev = 1 count/deg
+        // So use deg<<2 to multiply by 4 (i.e. convert degrees to quadrature counts) 
+        if ( (!is_running && pulseCount30p2 > DEGREES_TO_START<<2) || user_button_pressed ) {
+        
+            is_running = true;
+            gpio_put(led,0);
+            
+            // Set the PWM running
+            counterTicks = 0;
+            pwm_set_enabled(slice_num, true);
+            pwm_clear_irq(slice_num);
+            irq_set_enabled(PWM_IRQ_WRAP, true);
 
-	// Copy the buffer to flash just in case
-	currentInterrupts = save_and_disable_interrupts();
-	flash_range_erase( DATA_OFFSET, sizeof(SampleBuffer) );
-	flash_range_program( DATA_OFFSET, (uint8_t *)SampleBuffer, sizeof(SampleBuffer) );
-	restore_interrupts(currentInterrupts);
+            printf( "Sampling enabled\n" );
+        }
+        
+        // copy sample buffer to flash and hang
+        if((SampleCount >= maxSamples) || (pulseCount30p2 >= MAX_ENC_COUNTS) ){
+            uint32_t currentInterrupts;
+            
+            gpio_put(led,1);
+            printf("Trying to write to file and copy buffer to flash\r\n");
+            
+            SampleBuffer[0] = SampleCount; // store count in first element of buffer
+            writeDataFile(); // don't think this is really needed, it writes out again on restart anyway
 
-	doWrite = false;
-      }
-      
-      ledTask(msPerLedCycle);
-      tud_task();
+            // Copy the buffer to flash
+            currentInterrupts = save_and_disable_interrupts();
+            flash_range_erase( DATA_OFFSET, sizeof(SampleBuffer) );
+            flash_range_program( DATA_OFFSET, (uint8_t *)SampleBuffer, sizeof(SampleBuffer) );
+            //restore_interrupts(currentInterrupts);
+            printf("Done! %d errors.\n",errorCount);
+            
+            // hang and flash LED
+            led_state = true;
+            while(1){
+
+                // flash LED 
+                timecount = time_us_32();
+                if( (timecount - prev_loop_time) > 100000){
+                    led_state = !led_state;
+                    gpio_put(led,led_state);
+                    prev_loop_time = timecount;
+                }
+
+                // try to connect to PC as USB disk
+                // doesn't really matter how long this takes after data collection has completed
+                // NOTE: THIS ALSO DOESN'T SEEM TO WORK HERE!
+                tud_task();
+            }
+        }
+
+        // try to connect to PC host as USB disk?
+        // TinuUSB functionality
+        // but only do this when not collecting data to avoid overrunning sample time
+        // (althouth this seems to generally execute very quickly)
+        if(!is_running){
+            tud_task();
+        }
     }
 }
 
 void writeDataFile( void ) {
-	FIL f;
-	int n;
-	int res;
+    FIL f;
+    int n;
+    int res;
 
-	if (f_mount( &fs, "", 0 ) ) error("MOUNT");
-	if ( (res=f_open( &f, "data.txt", FA_CREATE_ALWAYS | FA_WRITE ))) error( "File Open" );       
+    if (f_mount( &fs, "", 0 ) ) error("MOUNT");
+    if ( (res=f_open( &f, "data.csv", FA_CREATE_ALWAYS | FA_WRITE ))) error( "File Open" );       
+    
+    n = sprintf( buf, "time_us,enc_count\n");
+    f_write( &f, buf, n, &n );
 
-	for ( int i = 0; i < NUM_SAMPLES; i++ ) {
-	  n = sprintf( buf, "%d\n", SampleBuffer[i] );
-	  f_write( &f, buf, n, &n );
-	  //	  printf( "%d\n", SampleBuffer[i] );
-	}
-	f_sync(&f);
-	f_close(&f);
-	printf("Closed and synced (%d errors)\n", errorCount);
+    for ( int i = 2; i < SampleBuffer[0]; i+=2 ) {
+        n = sprintf( buf, "%d,", SampleBuffer[i] );
+        f_write( &f, buf, n, &n );
+        n = sprintf( buf, "%d\n", SampleBuffer[i+1] );
+        f_write( &f, buf, n, &n );
+    }
+    f_sync(&f);
+    f_close(&f);
+    printf("Closed and synced (%d errors)\n", errorCount);
 
 }
 
@@ -276,7 +351,7 @@ void initFS(void) {
     FIL fil;
 
     int n;
-    
+
     // Initialize the ram disk
     //if (f_fdisk(0, (LBA_t[]){100,0}, buf) ) error("FDISK");
 
@@ -290,87 +365,54 @@ void initFS(void) {
     /* Write a message */
     n = sprintf( buf, "%s", _version_str );
     f_write( &fil, buf, n, &n );
-    
+
     /* Close the file */
     f_close(&fil);
     f_mount( 0, "", 0 );
 }
 
+// handle quadrature counting
 void stateUpdate( uint gpio, uint32_t eventMask ){
 
-  static uint8_t currentState = 0;
-  static int sampleCount = 0;
-  static bool done = false;
-  static int caveman = 4;
-  
-  if ( !done ) {
-    uint8_t nextState = 0;
-    uint32_t pinState = gpio_get_all();
-    
-    nextState |= (pinState & (1<<encoder.lagPinNum))  ? 1 : 0 ;
-    nextState |= (pinState & (1<<encoder.leadPinNum)) ? 2 : 0 ;
+    static uint8_t currentState = 0;
+    static bool done = false;
 
-    switch ( currentState ) {
-    case Quadrant0 :
-      if (nextState == Quadrant1) { pulseCount30p2++; }
-      if (nextState == Quadrant2) { errorCount++; }
-      if (nextState == Quadrant3) { pulseCount30p2--; }
-      break;
-    case Quadrant1 :
-      if (nextState == Quadrant2) { pulseCount30p2++; }
-      if (nextState == Quadrant3) { errorCount++; }
-      if (nextState == Quadrant0) { pulseCount30p2--; }
-      break;
-    case Quadrant2 :
-      if (nextState == Quadrant3) { pulseCount30p2++; }
-      if (nextState == Quadrant0) { errorCount++; }
-      if (nextState == Quadrant1) { pulseCount30p2--; }
-      break;
-    case Quadrant3 :
-      if (nextState == Quadrant0) { pulseCount30p2++; }
-      if (nextState == Quadrant1) { errorCount++; }
-      if (nextState == Quadrant2) { pulseCount30p2--; }
-      break;
-    }
+    if ( !done ) {
+        uint8_t nextState = 0;
+        uint32_t pinState = gpio_get_all();
 
-    currentState = nextState;
+        nextState |= (pinState & (1<<encoder.lagPinNum))  ? 1 : 0 ;
+        nextState |= (pinState & (1<<encoder.leadPinNum)) ? 2 : 0 ;
 
-    if ( caveman ){
-      printf( "%d\n", currentState );
-      caveman--;
+        switch ( currentState ) {
+            case Quadrant0 :
+                if (nextState == Quadrant1) { pulseCount30p2++; }
+                if (nextState == Quadrant2) { errorCount++; }
+                if (nextState == Quadrant3) { pulseCount30p2--; }
+                break;
+            case Quadrant1 :
+                if (nextState == Quadrant2) { pulseCount30p2++; }
+                if (nextState == Quadrant3) { errorCount++; }
+                if (nextState == Quadrant0) { pulseCount30p2--; }
+                break;
+            case Quadrant2 :
+                if (nextState == Quadrant3) { pulseCount30p2++; }
+                if (nextState == Quadrant0) { errorCount++; }
+                if (nextState == Quadrant1) { pulseCount30p2--; }
+                break;
+            case Quadrant3 :
+                if (nextState == Quadrant0) { pulseCount30p2++; }
+                if (nextState == Quadrant1) { errorCount++; }
+                if (nextState == Quadrant2) { pulseCount30p2--; }
+                break;
+        }
+
+        currentState = nextState;
     }
-    
-    if ( pulseCount30p2 > nextRotationCount ) {
-      SampleBuffer[sampleCount++] = counterTicks;
-      nextRotationCount += 36;  // 9 degrees
-      if ( sampleCount == NUM_SAMPLES ) {
-	done = true;
-	doWrite = true;
-	msPerLedCycle = 500;
-	printf( "Sampling complete\n");
-      }
-    }
-  }
 }
 
 void pwmInterrupt( void ) {
-  counterTicks++;
-  gpio_put( 4, !gpio_get(4) );
-  pwm_clear_irq(pwm_gpio_to_slice_num(4));
+    counterTicks++;
+    gpio_put( 4, !gpio_get(4) );
+    pwm_clear_irq(pwm_gpio_to_slice_num(4));
 }
-
-  
-void ledTask( uint32_t msPerCycle ) {
-  static uint32_t lastMillis = 0;
-
-  if ( msPerCycle == 0 ) {
-    gpio_put(led, 0);
-  } else if ( msPerCycle == ~0 ) {
-    gpio_put(led, 1);
-  } else if ( millis - lastMillis > msPerCycle>>2 ) {
-    lastMillis = millis;
-    gpio_put( led, !gpio_get(led) );
-  }
-}
-
-
