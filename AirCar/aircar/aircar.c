@@ -69,7 +69,7 @@
 // This system will start recording data after the encoder has
 // inidicated the wheels have rotate this many degrees.
 // BUT NOTE: can also start data collection with USER button to catch full transient 
-#define DEGREES_TO_START 1
+// #define DEGREES_TO_START 1
 
 
 // define encoder count at which to stop data collection
@@ -256,6 +256,7 @@ int main() {
         
         }
 
+        // wait for (and debounce) user button press
         if( !is_running && !user_button_pressed && ((timecount - prev_loop_time) >= BUTTON_DEBOUNCE_US) ){
             if( !gpio_get(20) ){
                 if(++user_button_count > 20){
@@ -267,11 +268,12 @@ int main() {
             prev_loop_time = timecount;
         }
 
-        // Start data collection after wheel rotates by some number of degrees
+        // Start data collection only after USER button is pushed
+        // [REMOVED] Start data collection after wheel rotates by some number of degrees
         // Physical/hardware encoder is natively 360 counts/rev = 1 count/deg
         // So use deg<<2 to multiply by 4 (i.e. convert degrees to quadrature counts) 
-        if ( (!is_running && pulseCount30p2 > DEGREES_TO_START<<2) || user_button_pressed ) {
-        
+        //if ( (!is_running && pulseCount30p2 > DEGREES_TO_START<<2) || user_button_pressed ) {
+        if(user_button_pressed){
             is_running = true;
             gpio_put(led,0);
             
