@@ -103,7 +103,7 @@ volatile int32_t pulseCount30p2 = 0;
 //
 // We save the data in flash so it will be there in the event of an
 //  "accident".  The erasing size is 4KB, so this is
-// 1024 samples of uint32_t.  All a bit convoluted, but hopefully
+// 1024 samples of int32_t.  All a bit convoluted, but hopefully
 // easy to tweak later if we want.
 // M. Kokko changed to 4x1024 = 4096 samples of uint32_t
 typedef uint32_t sample_t;
@@ -159,6 +159,7 @@ int main() {
     bool led_state = false;
     bool user_button_pressed = false;
     uint16_t user_button_count = 0;
+    int32_t initial_pulse_count = 0;
 
     pulseCount30p2 = 0;
     counterTicks = 0;
@@ -242,16 +243,11 @@ int main() {
         timecount = time_us_32();
 
         // enforce timing for logging encoder count
-        if( is_running && ((timecount - prev_loop_time) >= SAMPLE_TIME_US) && (SampleCount < (maxSamples-1))){
-          /*  time_vec[array_idx] = timecount;
-            count_vec[array_idx] = pulseCount30p2;
-            ++array_idx;
-            */
-            //printf("%d,%d\r\n",timecount,pulseCount30p2);
+        if( is_running && (((timecount - prev_loop_time) >= SAMPLE_TIME_US) || (SampleCount == 2) ) && (SampleCount < (maxSamples-1))){
            
             // add time and pulse count to sample buffer 
             SampleBuffer[SampleCount++] = timecount;
-            SampleBuffer[SampleCount++] = pulseCount30p2;
+            SampleBuffer[SampleCount++] = (uint32_t)pulseCount30p2; // negative numbers in 2's complmenet but will print ok with %d
             prev_loop_time = timecount;
         
         }
@@ -268,16 +264,20 @@ int main() {
             prev_loop_time = timecount;
         }
 
-        // Start data collection only after USER button is pushed
-        // [REMOVED] Start data collection after wheel rotates by some number of degrees
-        // Physical/hardware encoder is natively 360 counts/rev = 1 count/deg
-        // So use deg<<2 to multiply by 4 (i.e. convert degrees to quadrature counts) 
-        //if ( (!is_running && pulseCount30p2 > DEGREES_TO_START<<2) || user_button_pressed ) {
-        if(user_button_pressed){
+        // Start data capture only after USER button is pushed
+        // (encoder will be read and counted from boot, just not stored until now...)
+        // *** [REMOVED]: Start data collection after wheel rotates by some number of degrees
+        // *** Physical/hardware encoder is natively 360 counts/rev = 1 count/deg
+        // *** So use deg<<2 to multiply by 4 (i.e. convert degrees to quadrature counts) 
+        // *** if ( (!is_running && pulseCount30p2 > DEGREES_TO_START<<2) || user_button_pressed ) {
+        if(!is_running && user_button_pressed){
             is_running = true;
+            user_button_pressed = false;
             gpio_put(led,0);
-            
+            initial_pulse_count = pulseCount30p2;
+
             // Set the PWM running
+            // TODO: why do we need this?? (Mike asking...)
             counterTicks = 0;
             pwm_set_enabled(slice_num, true);
             pwm_clear_irq(slice_num);
@@ -287,7 +287,7 @@ int main() {
         }
         
         // copy sample buffer to flash and hang
-        if((SampleCount >= maxSamples) || (pulseCount30p2 >= MAX_ENC_COUNTS) ){
+        if(is_running && ((SampleCount >= maxSamples) || ((pulseCount30p2-initial_pulse_count) >= MAX_ENC_COUNTS)) ){
             uint32_t currentInterrupts;
             
             gpio_put(led,1);
@@ -317,7 +317,7 @@ int main() {
 
                 // try to connect to PC as USB disk
                 // doesn't really matter how long this takes after data collection has completed
-                // NOTE: THIS ALSO DOESN'T SEEM TO WORK HERE!
+                // TODO: THIS DOESN'T SEEM TO WORK HERE!
                 tud_task();
             }
         }

@@ -3,6 +3,6 @@
 
 #define _version_str \
     "AirCar MKII\n" \
-    "Version 0.5\n"
+    "Version 0.6\n"
 
 #endif
