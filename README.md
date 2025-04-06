@@ -1,4 +1,6 @@
 
+![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/TadAtThayer/PiPico/cmake-single-platform.yml?label=Build%20Status)
+
 # Purpose
 
 This repo started off as a way for me to explore the "new" Raspberry

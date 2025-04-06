@@ -4,9 +4,10 @@
 [submodule "pico-examples"]
 	path = pico-examples
 	url = https://github.com/raspberrypi/pico-examples.git
-[submodule "AirCar/aircar/fatfs"]
-	path = AirCar/aircar/fatfs
-	url = git@github.com:tadtruex/fatfs
 [submodule "AirCar/kicad/KiCad-RP-Pico"]
 	path = AirCar/kicad/KiCad-RP-Pico
 	url = https://github.com/ncarandini/KiCad-RP-Pico.git
+[submodule "AirCar/aircar/fatfs"]
+	path = AirCar/aircar/fatfs
+	url = https://github.com/tadtruex/fatfs.git
+	branch = aircar
